@@ -11,7 +11,11 @@
  */
 //#include "../usermods/EXAMPLE_v2/usermod_v2_example.h"
 
-#ifdef USERMOD_BATTERY
+#ifdef USERMOD_SERIAL_CONTROL
+  #include "usermods/SerialControl/SerialControlUsermod.h"
+#endif
+
+#ifdef USERMOD_SERIAL_CONTROL
   #include "../usermods/Battery/usermod_v2_Battery.h"
 #endif
 
@@ -250,6 +254,10 @@ void registerUsermods()
    * \/ \/ \/
    */
   //UsermodManager::add(new MyExampleUsermod());
+
+  #ifdef USERMOD_SERIAL_CONTROL
+  UsermodManager::add(new SerialControlUsermod());
+  #endif
 
   #ifdef USERMOD_BATTERY
   UsermodManager::add(new UsermodBattery());
