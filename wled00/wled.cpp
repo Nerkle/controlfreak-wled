@@ -337,6 +337,24 @@ void WLED::disableWatchdog() {
 }
 #endif
 
+void printFile(const char* filename) {
+  if (!WLED_FS.begin()) {
+    Serial.println("LittleFS mount failed!");
+    return;
+  }
+  File file = WLED_FS.open(filename, "r");
+  if (!file) {
+    Serial.printf("File %s not found or could not be opened!\n", filename);
+    return;
+  }
+  Serial.printf("---- Contents of %s ----\n", filename);
+  while (file.available()) {
+    Serial.write(file.read());
+  }
+  Serial.println("\n---- End of file ----");
+  file.close();
+}
+
 void WLED::setup()
 {
   #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_DISABLE_BROWNOUT_DET)
@@ -362,6 +380,11 @@ void WLED::setup()
   #endif
   DEBUG_PRINTLN();
   DEBUG_PRINTF_P(PSTR("---WLED %s %u INIT---\n"), versionString, VERSION);
+  DEBUG_PRINTF_P("ESP reset reason: %d\n", rtc_get_reset_reason(0));
+  delay(500);
+  printFile("/cfg.json");
+  printFile("/palettes.json");
+  printFile("/ledmaps.json");
   DEBUG_PRINTLN();
 #ifdef ARDUINO_ARCH_ESP32
   DEBUG_PRINTF_P(PSTR("esp32 %s\n"), ESP.getSdkVersion());
