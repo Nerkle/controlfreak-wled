@@ -148,9 +148,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
 
     // 1) Parse only the top‐level "cmd" field into a small StaticJsonDocument
     Serial.println("parsing json...");
-    delay(2000);
-    StaticJsonDocument<2048> headerDoc;
-    DeserializationError hdrErr = deserializeJson(headerDoc, cmdLine);
+    DynamicJsonDocument doc(cmdLine.length() * 2); // Or add 32–64 bytes headroom
+    DeserializationError hdrErr = deserializeJson(doc, cmdLine);
     Serial.println("parsed json...");
     if (hdrErr) {
         Serial.print("hdrErr = ");
@@ -166,7 +165,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
     }
     Serial.println("passed error...");
 
-    const char *cmd = headerDoc["cmd"];
+    const char *cmd = doc["cmd"];
     if (!cmd) {
         StaticJsonDocument<RESP_SMALL_CAP> respNoCmd;
         respNoCmd["status"]  = "error";

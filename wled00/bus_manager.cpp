@@ -155,7 +155,7 @@ BusDigital::BusDigital(BusConfig &bc, uint8_t nr, const ColorOrderMap &com)
   _valid = (_busPtr != nullptr);
   Serial.printf("Heap after bus %d: %u\n", nr, ESP.getFreeHeap());
   DEBUG_PRINTF_P(PSTR("%successfully inited strip %u (len %u) with type %u and pins %u,%u (itype %u). mA=%d/%d\n"), _valid?"S":"Uns", nr, bc.count, bc.type, _pins[0], is2Pin(bc.type)?_pins[1]:255, _iType, _milliAmpsPerLed, _milliAmpsMax);
-  DEBUG_PRINTLN("→ just past BusDigital ctor");
+  // DEBUG_PRINTLN("→ just past BusDigital ctor");
 }
 
 //fine tune power estimation constants for your setup
