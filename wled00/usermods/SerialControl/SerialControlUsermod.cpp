@@ -1,15 +1,12 @@
 #include "SerialControlUsermod.h"
 #include "wled.h"
-#include "bus_manager.h"
-#include "FS.h"
-#include <LittleFS.h>
 
 extern WS2812FX strip;
-extern BusConfig* busConfigs[WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES];
+// extern BusConfig* busConfigs[WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES];
 
 #define SERIAL_BAUD       115200
 #define CMD_BUFFER_SIZE   (5 * 1024)   // accept up to 5 KB of incoming JSON
-#define SEG_DOC_CAP       256          // ~256 bytes to parse a single segment
+#define SEG_DOC_CAP       512          // ~256 bytes to parse a single segment
 
 // Two distinct response‐buffer sizes:
 static const size_t RESP_SMALL_CAP = 256;   // for setState “ok” / error messages
@@ -17,6 +14,7 @@ static const size_t RESP_LARGE_CAP = (5 * 1024);  // for getState full segment d
 
 void SerialControlUsermod::setup() {
     Serial.begin(115200);
+    Serial.println("blah");
     Serial.println("SerialControlUsermod: starting up");
     DEBUG_PRINTLN("▶ SerialControlUsermod::setup() called");
 
@@ -147,10 +145,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
     Serial.println(cmdLine);
 
     // 1) Parse only the top‐level "cmd" field into a small StaticJsonDocument
-    Serial.println("parsing json...");
-    DynamicJsonDocument doc(cmdLine.length() * 2); // Or add 32–64 bytes headroom
+    DynamicJsonDocument doc(cmdLine.length() * 4);
     DeserializationError hdrErr = deserializeJson(doc, cmdLine);
-    Serial.println("parsed json...");
     if (hdrErr) {
         Serial.print("hdrErr = ");
         Serial.println(hdrErr.c_str());
@@ -160,6 +156,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         respErr["message"] = "invalid JSON";
         String out;
         serializeJson(respErr, out);
+        Serial.println("response (1):");
+        Serial.println(out);
         Serial1.println(out);
         return;
     }
@@ -172,6 +170,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         respNoCmd["message"] = "missing cmd";
         String out;
         serializeJson(respNoCmd, out);
+        Serial.println("response (2):");
+        Serial.println(out);
         Serial1.println(out);
         return;
     }
@@ -192,6 +192,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respOK["segCount"] = strip.getSegmentsNum();
             String out;
             serializeJson(respOK, out);
+            Serial.println("response (3):");
+            Serial.println(out);
             Serial1.println(out);
             return;
         }
@@ -204,6 +206,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respErr["message"] = "malformed seg array";
             String out;
             serializeJson(respErr, out);
+            Serial.println("response (4):");
+            Serial.println(out);
             Serial1.println(out);
             return;
         }
@@ -228,6 +232,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respErr["message"] = "unterminated seg array";
             String out;
             serializeJson(respErr, out);
+            Serial.println("response (5):");
+            Serial.println(out);
             Serial1.println(out);
             return;
         }
@@ -298,6 +304,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             strip.setMode(newSegCount, fx);
 
             // 2.f.viii) Assign speed & intensity
+            strip.getSegment(newSegCount).on        = segOn;
             strip.getSegment(newSegCount).speed     = sx;
             strip.getSegment(newSegCount).intensity = ix;
 
@@ -340,6 +347,8 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         respOK["segCount"] = strip.getSegmentsNum();
         String outOK;
         serializeJson(respOK, outOK);
+        Serial.println("response (6):");
+        Serial.println(outOK);
         Serial1.println(outOK);
         return;
     }
@@ -387,7 +396,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
 
         String out;
         serializeJson(resp, out);
-        Serial.println("response:");
+        Serial.println("response (7):");
         Serial.println(out);
         Serial1.println(out);
         return;
@@ -399,5 +408,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
     respUnknown["message"] = "unknown cmd";
     String outUnknown;
     serializeJson(respUnknown, outUnknown);
+    Serial.println("response (8):");
+    Serial.println(outUnknown);
     Serial1.println(outUnknown);
 }
