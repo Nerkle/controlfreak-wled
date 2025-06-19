@@ -194,7 +194,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             serializeJson(respOK, out);
             Serial.println("response (3):");
             Serial.println(out);
-            Serial1.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -208,7 +208,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             serializeJson(respErr, out);
             Serial.println("response (4):");
             Serial.println(out);
-            Serial1.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -234,7 +234,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             serializeJson(respErr, out);
             Serial.println("response (5):");
             Serial.println(out);
-            Serial1.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -349,7 +349,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         serializeJson(respOK, outOK);
         Serial.println("response (6):");
         Serial.println(outOK);
-        Serial1.println(outOK);
+        // Serial1.println(outOK);
         return;
     }
 
