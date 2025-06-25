@@ -1,75 +1,186 @@
 #include "SerialControlUsermod.h"
+#include "wled.h"
 
 extern WS2812FX strip;
+// extern BusConfig* busConfigs[WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES];
 
 #define SERIAL_BAUD       115200
 #define CMD_BUFFER_SIZE   (5 * 1024)   // accept up to 5 KB of incoming JSON
-#define SEG_DOC_CAP       256          // ~256 bytes to parse a single segment
+#define SEG_DOC_CAP       512          // ~256 bytes to parse a single segment
 
 // Two distinct response‐buffer sizes:
 static const size_t RESP_SMALL_CAP = 256;   // for setState “ok” / error messages
 static const size_t RESP_LARGE_CAP = (5 * 1024);  // for getState full segment dump
 
 void SerialControlUsermod::setup() {
-    // Begin USB‐Serial for debug output
     Serial.begin(115200);
+    Serial.println("blah");
     Serial.println("SerialControlUsermod: starting up");
-
     DEBUG_PRINTLN("▶ SerialControlUsermod::setup() called");
 
-    // Initialize the “secondary” UART (Serial1) on GPIO16=RX1, GPIO17=TX1:
-    Serial1.begin(SERIAL_BAUD, SERIAL_8N1, /*RX=*/16, /*TX=*/17);
-    Serial1.setTimeout(10);
+    // // // GPIO pins for each strip
+    // uint8_t pins1[] = { 4 };   // first output GPIO
+    // uint8_t pins2[] = { 2 };   // second output GPIO
+    // uint8_t pins3[] = { 23 };   // third output GPIO
 
+    // BusManager::setMilliampsMax(0);
+    //
+    // busConfigs[0] = new BusConfig(
+    //   TYPE_WS2812_RGB,
+    //   pins1,
+    //   0,
+    //   800,
+    //   COL_ORDER_BRG
+    // );
+    // busConfigs[0]->milliAmpsPerLed = 55;
+    // busConfigs[0]->milliAmpsMax    = 10000;
+    //
+    // busConfigs[1] = new BusConfig(
+    //     TYPE_WS2812_RGB,
+    //     pins2,
+    //     800,   // next pixel offset
+    //     800,
+    //     COL_ORDER_BRG
+    // );
+    // busConfigs[1]->milliAmpsPerLed = 55;
+    // busConfigs[1]->milliAmpsMax    = 10000;
+    //
+    // busConfigs[2] = new BusConfig(
+    //     TYPE_WS2812_RGB,
+    //     pins3,
+    //     1600,  // next pixel offset
+    //     800,
+    //     COL_ORDER_BRG
+    // );
+    // busConfigs[2]->milliAmpsPerLed = 55;
+    // busConfigs[2]->milliAmpsMax    = 10000;
+    //
+    // // mark that WLED should re‐initialize all buses
+    // doInitBusses = true;
+
+    Serial1.begin(SERIAL_BAUD, SERIAL_8N1, /*RX=*/16, /*TX=*/17);
+    Serial1.setTimeout(500);
+    Serial1.setRxBufferSize(2048);
     Serial.println(F("SerialControlUsermod: listening on Serial1 for JSON commands…"));
 }
 
 void SerialControlUsermod::loop() {
-    // Read incoming bytes from Serial1 until newline
+    static bool awaitingCmd = true;        // Searching for prefix?
+    static size_t matchIndex = 0;          // Prefix match progress
+    static const char prefix[] = "{\"cmd\":";
+    static const size_t prefixLen = sizeof(prefix) - 1;
+    static int braceDepth = 0;
+    static String inputLine;
+    static bool inJson = false;
+    static size_t chunkCount = 0;
+
+    int avail0 = Serial1.available();
+    if (!avail0) return;
+    // Serial.printf("[UC] %d bytes available at loop start\n", avail0);
+
     while (Serial1.available()) {
-        char c = (char)Serial1.read();
-        if (c == '\n') {
-            // We have a complete JSON command in inputLine
-            handleCommand(inputLine);
-            inputLine.clear();
-        } else if (c != '\r') {
+        int b = Serial1.read();
+        if (b < 0) return;
+        char c = (char)b;
+        // Serial.printf("[UC] got: 0x%02X '%c'\n", b, (c >= 32 && c < 127) ? c : '.');
+
+        if (awaitingCmd) {
+            // Debugging: show prefix matching progress
+            // Serial.printf("[UC] matching prefix: index %u/%u, char '%c', expected '%c'\n",
+            //               matchIndex, prefixLen, c, prefix[matchIndex]);
+            if (c == prefix[matchIndex]) {
+                matchIndex++;
+                if (matchIndex == prefixLen) {
+                    Serial.println("[UC] found prefix {\"cmd\":, starting JSON");
+                    inputLine = String(prefix);
+                    braceDepth = 1;   // The '{' from the prefix
+                    inJson = true;
+                    awaitingCmd = false;
+                    chunkCount = 0;
+                    matchIndex = 0;
+                }
+            } else {
+                if (matchIndex && c == prefix[0]) {
+                    Serial.println("[UC] partial prefix interrupted, found '{', restarting matchIndex at 1");
+                    matchIndex = 1;
+                } else {
+                    if (matchIndex) Serial.println("[UC] prefix match lost, reset to 0");
+                    matchIndex = 0;
+                }
+            }
+        }
+        else if (inJson) {
             inputLine += c;
-            // Safety: if buffer grows too large, reset it
+            chunkCount++;
+            // Serial.printf("[UC] added to inputLine, total len=%u\n", inputLine.length());
+
+            if (c == '{')      { braceDepth++; /* Serial.printf("[UC] braceDepth++ = %d\n", braceDepth); */ }
+            else if (c == '}') { braceDepth--; /* Serial.printf("[UC] braceDepth-- = %d\n", braceDepth); */ }
+
+            // Only complete when braces closed AND newline seen
+            if (braceDepth == 0 && c == '\n') {
+                Serial.printf("[UC] complete JSON (%u bytes, %u read calls):\n%s\n",
+                              inputLine.length(), chunkCount, inputLine.c_str());
+                handleCommand(inputLine);
+                inputLine = "";
+                inJson = false;
+                awaitingCmd = true;  // Start looking for next command
+                chunkCount = 0;
+                Serial.println("[UC] Command parsed and handler called, returning to prefix search");
+                break;
+            }
             if (inputLine.length() > CMD_BUFFER_SIZE - 1) {
-                inputLine.clear();
-                Serial.println(F("SerialControlUsermod: buffer overflow, dropping line"));
+                Serial.println("[UC] buffer overrun, clearing");
+                inputLine = "";
+                inJson = false;
+                awaitingCmd = true;
+                chunkCount = 0;
             }
         }
     }
 }
 
 void SerialControlUsermod::handleCommand(const String &cmdLine) {
+    Serial.println("handling Command:");
+    Serial.println(cmdLine);
+
     // 1) Parse only the top‐level "cmd" field into a small StaticJsonDocument
-    StaticJsonDocument<128> headerDoc;
-    DeserializationError hdrErr = deserializeJson(headerDoc, cmdLine);
+    DynamicJsonDocument doc(cmdLine.length() * 4);
+    DeserializationError hdrErr = deserializeJson(doc, cmdLine);
     if (hdrErr) {
+        Serial.print("hdrErr = ");
+        Serial.println(hdrErr.c_str());
+
         StaticJsonDocument<RESP_SMALL_CAP> respErr;
         respErr["status"]  = "error";
         respErr["message"] = "invalid JSON";
         String out;
         serializeJson(respErr, out);
+        Serial.println("response (1):");
+        Serial.println(out);
         Serial1.println(out);
         return;
     }
+    Serial.println("passed error...");
 
-    const char *cmd = headerDoc["cmd"];
+    const char *cmd = doc["cmd"];
     if (!cmd) {
         StaticJsonDocument<RESP_SMALL_CAP> respNoCmd;
         respNoCmd["status"]  = "error";
         respNoCmd["message"] = "missing cmd";
         String out;
         serializeJson(respNoCmd, out);
+        Serial.println("response (2):");
+        Serial.println(out);
         Serial1.println(out);
         return;
     }
 
+    Serial.println("parsed command...");
+
     // 2) Handle "setState" → small response buffer
     if (strcmp(cmd, "setState") == 0) {
+        Serial.println("Performing setState...");
         bool anyChange = false;
 
         // 2.a) Find the substring "\"seg\":[" in cmdLine
@@ -81,7 +192,9 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respOK["segCount"] = strip.getSegmentsNum();
             String out;
             serializeJson(respOK, out);
-            Serial1.println(out);
+            Serial.println("response (3):");
+            Serial.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -93,7 +206,9 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respErr["message"] = "malformed seg array";
             String out;
             serializeJson(respErr, out);
-            Serial1.println(out);
+            Serial.println("response (4):");
+            Serial.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -117,7 +232,9 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             respErr["message"] = "unterminated seg array";
             String out;
             serializeJson(respErr, out);
-            Serial1.println(out);
+            Serial.println("response (5):");
+            Serial.println(out);
+            // Serial1.println(out);
             return;
         }
 
@@ -129,6 +246,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
 
         // 2.f) Walk through segArrayJson looking for each "{ … }"
         int len = segArrayJson.length();
+        Serial.printf("Processing segments: %s", segArrayJson.c_str());
         int i = 0;
         uint8_t newSegCount = 0;
         while (i < len) {
@@ -186,6 +304,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             strip.setMode(newSegCount, fx);
 
             // 2.f.viii) Assign speed & intensity
+            strip.getSegment(newSegCount).on        = segOn;
             strip.getSegment(newSegCount).speed     = sx;
             strip.getSegment(newSegCount).intensity = ix;
 
@@ -208,6 +327,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             anyChange = true;
         }
 
+        Serial.println("Finishing processing segments");
         // 2.g) Finish segment setup
         strip.setMainSegmentId(0);
         strip.setTargetFps(WLED_FPS);
@@ -217,6 +337,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
 
         // 2.h) If any segment changed, force immediate update
         if (anyChange) {
+            Serial.println("Trigger strip change!");
             strip.service();
         }
 
@@ -226,17 +347,30 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         respOK["segCount"] = strip.getSegmentsNum();
         String outOK;
         serializeJson(respOK, outOK);
-        Serial1.println(outOK);
+        Serial.println("response (6):");
+        Serial.println(outOK);
+        // Serial1.println(outOK);
         return;
     }
 
     // 3) Handle “getState” → larger response buffer
     if (strcmp(cmd, "getState") == 0) {
+        Serial.println("Performing getState...");
+        Serial.printf("Heap before JSON doc: %u\n", ESP.getFreeHeap());
+
         StaticJsonDocument<RESP_LARGE_CAP> resp;
         JsonArray segArr = resp.createNestedArray("seg");
 
-        for (uint8_t i = 0; i < strip.getSegmentsNum(); i++) {
+        uint8_t numSegs = strip.getSegmentsNum();
+        Serial.printf("getSegmentsNum() = %u\n", numSegs);
+
+        for (uint8_t i = 0; i < numSegs; i++) {
+            Serial.printf("About to fetch segment %u...\n", i);
             auto &S = strip.getSegment(i);
+
+            Serial.printf("Segment %u: start=%u stop=%u on=%u mode=%u speed=%u intensity=%u colors@%p\n",
+                          i, S.start, S.stop, S.on, S.mode, S.speed, S.intensity, (void*)S.colors);
+
             JsonObject so = segArr.createNestedObject();
             so["id"]    = i;
             so["on"]    = S.on;
@@ -248,7 +382,9 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
 
             JsonArray colOut = so.createNestedArray("col");
             for (uint8_t cidx = 0; cidx < 3; cidx++) {
+                Serial.printf("Segment %u color[%u]: ", i, cidx);
                 CRGB c = S.colors[cidx];
+                Serial.printf("R=%u G=%u B=%u\n", c.red, c.green, c.blue);
                 JsonArray rgb = colOut.createNestedArray();
                 rgb.add(c.red);
                 rgb.add(c.green);
@@ -256,8 +392,12 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
             }
         }
 
+        Serial.printf("Heap after JSON doc: %u\n", ESP.getFreeHeap());
+
         String out;
         serializeJson(resp, out);
+        Serial.println("response (7):");
+        Serial.println(out);
         Serial1.println(out);
         return;
     }
@@ -268,5 +408,7 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
     respUnknown["message"] = "unknown cmd";
     String outUnknown;
     serializeJson(respUnknown, outUnknown);
+    Serial.println("response (8):");
+    Serial.println(outUnknown);
     Serial1.println(outUnknown);
 }

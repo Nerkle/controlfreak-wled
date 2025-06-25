@@ -15,7 +15,7 @@
   #include "usermods/SerialControl/SerialControlUsermod.h"
 #endif
 
-#ifdef USERMOD_SERIAL_CONTROL
+#ifdef USERMOD_BATTERY
   #include "../usermods/Battery/usermod_v2_Battery.h"
 #endif
 

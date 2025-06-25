@@ -129,6 +129,7 @@ BusDigital::BusDigital(BusConfig &bc, uint8_t nr, const ColorOrderMap &com)
 , _milliAmpsMax(bc.milliAmpsMax)
 , _colorOrderMap(com)
 {
+  Serial.printf("Heap before bus %d: %u\n", nr, ESP.getFreeHeap());
   if (!isDigital(bc.type) || !bc.count) return;
   if (!PinManager::allocatePin(bc.pins[0], true, PinOwner::BusDigital)) return;
   _frequencykHz = 0U;
@@ -152,7 +153,9 @@ BusDigital::BusDigital(BusConfig &bc, uint8_t nr, const ColorOrderMap &com)
   if (bc.type == TYPE_WS2812_1CH_X3) lenToCreate = NUM_ICS_WS2812_1CH_3X(bc.count); // only needs a third of "RGB" LEDs for NeoPixelBus
   _busPtr = PolyBus::create(_iType, _pins, lenToCreate + _skip, nr);
   _valid = (_busPtr != nullptr);
+  Serial.printf("Heap after bus %d: %u\n", nr, ESP.getFreeHeap());
   DEBUG_PRINTF_P(PSTR("%successfully inited strip %u (len %u) with type %u and pins %u,%u (itype %u). mA=%d/%d\n"), _valid?"S":"Uns", nr, bc.count, bc.type, _pins[0], is2Pin(bc.type)?_pins[1]:255, _iType, _milliAmpsPerLed, _milliAmpsMax);
+  // DEBUG_PRINTLN("→ just past BusDigital ctor");
 }
 
 //fine tune power estimation constants for your setup
