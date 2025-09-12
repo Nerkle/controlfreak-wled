@@ -2,7 +2,9 @@
 #include "wled.h"
 
 extern WS2812FX strip;
-// extern BusConfig* busConfigs[WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES];
+extern BusConfig* busConfigs[WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES];
+static std::vector<uint32_t> g_busBase;   // base pixel index for each bus
+static bool g_topologyConfigured = false;
 
 #define SERIAL_BAUD       115200
 #define CMD_BUFFER_SIZE   (5 * 1024)   // accept up to 5 KB of incoming JSON
@@ -13,7 +15,8 @@ static const size_t RESP_SMALL_CAP = 256;   // for setState “ok” / error mes
 static const size_t RESP_LARGE_CAP = (5 * 1024);  // for getState full segment dump
 
 void SerialControlUsermod::setup() {
-    Serial.begin(115200);
+    // Running this again here causes a crash
+    // Serial.begin(115200);
     Serial.println("blah");
     Serial.println("SerialControlUsermod: starting up");
     DEBUG_PRINTLN("▶ SerialControlUsermod::setup() called");
@@ -140,6 +143,24 @@ void SerialControlUsermod::loop() {
     }
 }
 
+static void respondOk(const char* key = nullptr, int value = -1) {
+    StaticJsonDocument<256> doc;
+    doc["status"] = "ok";
+    if (key) doc[key] = value;
+    String out; serializeJson(doc, out);
+    Serial.println(out);
+    Serial1.println(out);
+}
+
+static void respondError(const char* msg) {
+    StaticJsonDocument<256> doc;
+    doc["status"]  = "error";
+    doc["message"] = msg ? msg : "error";
+    String out; serializeJson(doc, out);
+    Serial.println(out);
+    Serial1.println(out);
+}
+
 void SerialControlUsermod::handleCommand(const String &cmdLine) {
     Serial.println("handling Command:");
     Serial.println(cmdLine);
@@ -161,7 +182,6 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         Serial1.println(out);
         return;
     }
-    Serial.println("passed error...");
 
     const char *cmd = doc["cmd"];
     if (!cmd) {
@@ -176,229 +196,247 @@ void SerialControlUsermod::handleCommand(const String &cmdLine) {
         return;
     }
 
-    Serial.println("parsed command...");
-
     // 2) Handle "setState" → small response buffer
     if (strcmp(cmd, "setState") == 0) {
-        Serial.println("Performing setState...");
+        if (!g_topologyConfigured) {
+            // not fatal, but warn—your MCU should call setTopology at boot
+            Serial.println(F("setState: topology not configured yet (continuing)"));
+        }
+
+        const char *mode = doc["mode"] | "replace"; // "replace" (default) or "patch"
+        int32_t busOffset = doc["busOffset"] | 0; // add to each start/stop (relative addressing)
+
+        JsonArray segArr = doc["seg"].as<JsonArray>();
+        if (segArr.isNull()) {
+            respondOk("segCount", strip.getSegmentsNum()); // nothing to do
+            return;
+        }
+
         bool anyChange = false;
 
-        // 2.a) Find the substring "\"seg\":[" in cmdLine
-        int idxSegKey = cmdLine.indexOf("\"seg\":");
-        if (idxSegKey < 0) {
-            // No "seg" → nothing to change
-            StaticJsonDocument<RESP_SMALL_CAP> respOK;
-            respOK["status"]   = "ok";
-            respOK["segCount"] = strip.getSegmentsNum();
-            String out;
-            serializeJson(respOK, out);
-            Serial.println("response (3):");
-            Serial.println(out);
-            // Serial1.println(out);
-            return;
-        }
+        if (!strcmp(mode, "replace")) {
+            strip.resetSegments();
+            uint8_t newId = 0;
 
-        // 2.b) Find '[' after "\"seg\":"
-        int idxOpenBracket = cmdLine.indexOf('[', idxSegKey);
-        if (idxOpenBracket < 0) {
-            StaticJsonDocument<RESP_SMALL_CAP> respErr;
-            respErr["status"]  = "error";
-            respErr["message"] = "malformed seg array";
-            String out;
-            serializeJson(respErr, out);
-            Serial.println("response (4):");
-            Serial.println(out);
-            // Serial1.println(out);
-            return;
-        }
+            for (JsonObject sObj: segArr) {
+                bool on = sObj["on"] | true;
+                int32_t st = sObj["start"] | 0;
+                int32_t sp = sObj["stop"] | 0;
+                int32_t fx = sObj["fx"] | 0;
+                int32_t sx = sObj["sx"] | 150;
+                int32_t ix = sObj["ix"] | 150;
+                int32_t bri = sObj["bri"] | 255;
 
-        // 2.c) Find matching ']' by tracking nesting
-        int depth = 1;
-        int idxCloseBracket = -1;
-        for (int i = idxOpenBracket + 1; i < cmdLine.length(); i++) {
-            char ch = cmdLine.charAt(i);
-            if (ch == '[')  depth++;
-            else if (ch == ']') {
-                depth--;
-                if (depth == 0) {
-                    idxCloseBracket = i;
-                    break;
-                }
-            }
-        }
-        if (idxCloseBracket < 0) {
-            StaticJsonDocument<RESP_SMALL_CAP> respErr;
-            respErr["status"]  = "error";
-            respErr["message"] = "unterminated seg array";
-            String out;
-            serializeJson(respErr, out);
-            Serial.println("response (5):");
-            Serial.println(out);
-            // Serial1.println(out);
-            return;
-        }
+                st += busOffset;
+                sp += busOffset;
+                if (sp <= st) continue;
 
-        // 2.d) Extract exactly the substring "[ {…}, {…}, … ]"
-        String segArrayJson = cmdLine.substring(idxOpenBracket, idxCloseBracket + 1);
+                strip.setSegment(newId, (uint16_t) st, (uint16_t) sp, 1, 0, UINT16_MAX, 0, 1);
+                strip.setMode(newId, (uint8_t) fx);
 
-        // 2.e) Clear all existing segments
-        strip.resetSegments();
+                auto &S = strip.getSegment(newId);
+                S.on = on;
+                S.speed = (uint8_t) sx;
+                S.intensity = (uint8_t) ix;
+                S.setOpacity((uint8_t) bri);
 
-        // 2.f) Walk through segArrayJson looking for each "{ … }"
-        int len = segArrayJson.length();
-        Serial.printf("Processing segments: %s", segArrayJson.c_str());
-        int i = 0;
-        uint8_t newSegCount = 0;
-        while (i < len) {
-            // 2.f.i) Skip until next '{'
-            if (segArrayJson.charAt(i) != '{') {
-                i++;
-                continue;
-            }
-            // 2.f.ii) Found '{' → find matching '}'
-            int braceDepth = 1;
-            int j = i + 1;
-            for (; j < len; j++) {
-                char c2 = segArrayJson.charAt(j);
-                if (c2 == '{')      braceDepth++;
-                else if (c2 == '}') braceDepth--;
-                if (braceDepth == 0) break;
-            }
-            if (j >= len) {
-                // Unterminated '{'
-                break;
-            }
-
-            // 2.f.iii) Extract oneSegJson = substring(i..j)
-            String oneSegJson = segArrayJson.substring(i, j + 1);
-            i = j + 1; // advance for next iteration
-
-            // 2.f.iv) Deserialize just this one segment object
-            StaticJsonDocument<SEG_DOC_CAP> segDoc;
-            auto segErr = deserializeJson(segDoc, oneSegJson);
-            if (segErr) {
-                Serial.printf("⚠️ SerialControlUsermod: failed to parse single seg: %s\n",
-                              segErr.c_str());
-                continue;
-            }
-            JsonObject sObj = segDoc.as<JsonObject>();
-
-            // 2.f.v) Pull fields (with defaults)
-            bool segOn      = sObj["on"]   | true;   // default true
-            uint16_t start  = sObj["start"] | 0;
-            uint16_t stop   = sObj["stop"]  | 0;
-            uint8_t fx      = sObj["fx"]    | 0;
-            uint8_t sx      = sObj["sx"]    | 150;   // default speed
-            uint8_t ix      = sObj["ix"]    | 150;   // default intensity
-
-            if (stop < start) {
-                // invalid range → skip
-                continue;
-            }
-
-            // 2.f.vi) Create the segment
-            strip.setSegment(newSegCount, start, stop,
-                             1, 0, UINT16_MAX, 0, 1);
-
-            // 2.f.vii) Assign effect (mode)
-            strip.setMode(newSegCount, fx);
-
-            // 2.f.viii) Assign speed & intensity
-            strip.getSegment(newSegCount).on        = segOn;
-            strip.getSegment(newSegCount).speed     = sx;
-            strip.getSegment(newSegCount).intensity = ix;
-
-            // 2.f.ix) If “col” array exists, load up to 3 color slots
-            if (sObj.containsKey("col") && sObj["col"].is<JsonArray>()) {
-                JsonArray colIn = sObj["col"].as<JsonArray>();
-                for (uint8_t cIndex = 0; cIndex < 3 && cIndex < colIn.size(); cIndex++) {
-                    JsonArray trip = colIn[cIndex].as<JsonArray>();
-                    if (trip.size() == 3) {
-                        uint8_t r = trip[0].as<uint8_t>();
-                        uint8_t g = trip[1].as<uint8_t>();
-                        uint8_t b = trip[2].as<uint8_t>();
-                        strip.getSegment(newSegCount).setColor(
-                          cIndex, RGBW32(r, g, b, 0));
+                if (sObj.containsKey("col") && sObj["col"].is<JsonArray>()) {
+                    JsonArray colIn = sObj["col"].as<JsonArray>();
+                    for (uint8_t cIndex = 0; cIndex < 3 && cIndex < colIn.size(); cIndex++) {
+                        JsonArray trip = colIn[cIndex].as<JsonArray>();
+                        if (trip.size() == 3) {
+                            uint8_t r = trip[0].as<uint8_t>();
+                            uint8_t g = trip[1].as<uint8_t>();
+                            uint8_t b = trip[2].as<uint8_t>();
+                            S.setColor(cIndex, RGBW32(r, g, b, 0));
+                        }
                     }
                 }
+
+                newId++;
+                anyChange = true;
             }
 
-            newSegCount++;
-            anyChange = true;
+            strip.setMainSegmentId(0);
+            strip.setTargetFps(WLED_FPS);
+            strip.setShowCallback(nullptr);
+            strip.setTransitionMode(false);
+            strip.restartRuntime();
+        } else {
+            // PATCH: update selected segments by id, or append
+            for (JsonObject sObj: segArr) {
+                int hasId = sObj.containsKey("id") ? sObj["id"].as<int>() : -1;
+
+                bool on = sObj["on"] | true;
+                int32_t st = sObj["start"] | -1;
+                int32_t sp = sObj["stop"] | -1;
+                int32_t fx = sObj["fx"] | -1;
+                int32_t sx = sObj["sx"] | -1;
+                int32_t ix = sObj["ix"] | -1;
+                int32_t bri = sObj["bri"] | -1;
+
+                if (st >= 0) st += busOffset;
+                if (sp >= 0) sp += busOffset;
+                if (st >= 0 && sp >= 0 && sp <= st) continue;
+
+                if (hasId >= 0 && hasId < strip.getSegmentsNum()) {
+                    auto &S = strip.getSegment((uint8_t) hasId);
+                    if (st >= 0 && sp >= 0) strip.setSegment((uint8_t) hasId, (uint16_t) st, (uint16_t) sp, 1, 0,
+                                                             UINT16_MAX, 0, 1);
+                    if (fx >= 0) strip.setMode((uint8_t) hasId, (uint8_t) fx);
+                    S.on = on;
+                    if (sx >= 0) S.speed = (uint8_t) sx;
+                    if (ix >= 0) S.intensity = (uint8_t) ix;
+                    if (bri >= 0) S.setOpacity((uint8_t) bri);
+
+                    if (sObj.containsKey("col") && sObj["col"].is<JsonArray>()) {
+                        JsonArray colIn = sObj["col"].as<JsonArray>();
+                        for (uint8_t cIndex = 0; cIndex < 3 && cIndex < colIn.size(); cIndex++) {
+                            JsonArray trip = colIn[cIndex].as<JsonArray>();
+                            if (trip.size() == 3) {
+                                uint8_t r = trip[0].as<uint8_t>();
+                                uint8_t g = trip[1].as<uint8_t>();
+                                uint8_t b = trip[2].as<uint8_t>();
+                                S.setColor(cIndex, RGBW32(r, g, b, 0));
+                            }
+                        }
+                    }
+                    anyChange = true;
+                } else {
+                    // append new segment
+                    int32_t st2 = (st >= 0) ? st : 0;
+                    int32_t sp2 = (sp >= 0) ? sp : 0;
+                    if (sp2 <= st2) continue;
+
+                    uint8_t newId = strip.getSegmentsNum();
+                    strip.setSegment(newId, (uint16_t) st2, (uint16_t) sp2, 1, 0, UINT16_MAX, 0, 1);
+                    if (fx >= 0) strip.setMode(newId, (uint8_t) fx);
+
+                    auto &S = strip.getSegment(newId);
+                    S.on = on;
+                    if (sx >= 0) S.speed = (uint8_t) sx;
+                    if (ix >= 0) S.intensity = (uint8_t) ix;
+                    if (bri >= 0) S.setOpacity((uint8_t) bri);
+
+                    if (sObj.containsKey("col") && sObj["col"].is<JsonArray>()) {
+                        JsonArray colIn = sObj["col"].as<JsonArray>();
+                        for (uint8_t cIndex = 0; cIndex < 3 && cIndex < colIn.size(); cIndex++) {
+                            JsonArray trip = colIn[cIndex].as<JsonArray>();
+                            if (trip.size() == 3) {
+                                uint8_t r = trip[0].as<uint8_t>();
+                                uint8_t g = trip[1].as<uint8_t>();
+                                uint8_t b = trip[2].as<uint8_t>();
+                                S.setColor(cIndex, RGBW32(r, g, b, 0));
+                            }
+                        }
+                    }
+                    anyChange = true;
+                }
+            }
         }
 
-        Serial.println("Finishing processing segments");
-        // 2.g) Finish segment setup
-        strip.setMainSegmentId(0);
-        strip.setTargetFps(WLED_FPS);
-        strip.setShowCallback(nullptr);
-        strip.setTransitionMode(false);
-        strip.restartRuntime();
-
-        // 2.h) If any segment changed, force immediate update
         if (anyChange) {
-            Serial.println("Trigger strip change!");
-            strip.service();
+            strip.service(); // immediate refresh
         }
 
-        // 2.i) Send back a small “ok” JSON
-        StaticJsonDocument<RESP_SMALL_CAP> respOK;
-        respOK["status"]   = "ok";
-        respOK["segCount"] = strip.getSegmentsNum();
-        String outOK;
-        serializeJson(respOK, outOK);
-        Serial.println("response (6):");
-        Serial.println(outOK);
-        // Serial1.println(outOK);
+        StaticJsonDocument<256> resp;
+        resp["status"] = "ok";
+        resp["segCount"] = strip.getSegmentsNum();
+        String out;
+        serializeJson(resp, out);
+        Serial.println(out);
+        Serial1.println(out);
         return;
     }
 
     // 3) Handle “getState” → larger response buffer
     if (strcmp(cmd, "getState") == 0) {
-        Serial.println("Performing getState...");
-        Serial.printf("Heap before JSON doc: %u\n", ESP.getFreeHeap());
-
         StaticJsonDocument<RESP_LARGE_CAP> resp;
         JsonArray segArr = resp.createNestedArray("seg");
 
         uint8_t numSegs = strip.getSegmentsNum();
-        Serial.printf("getSegmentsNum() = %u\n", numSegs);
-
         for (uint8_t i = 0; i < numSegs; i++) {
-            Serial.printf("About to fetch segment %u...\n", i);
             auto &S = strip.getSegment(i);
-
-            Serial.printf("Segment %u: start=%u stop=%u on=%u mode=%u speed=%u intensity=%u colors@%p\n",
-                          i, S.start, S.stop, S.on, S.mode, S.speed, S.intensity, (void*)S.colors);
-
             JsonObject so = segArr.createNestedObject();
             so["id"]    = i;
             so["on"]    = S.on;
             so["start"] = S.start;
             so["stop"]  = S.stop;
-            so["fx"]    = S.mode;          // effect index
-            so["sx"]    = S.speed;         // speed
-            so["ix"]    = S.intensity;     // intensity
+            so["fx"]    = S.mode;
+            so["sx"]    = S.speed;
+            so["ix"]    = S.intensity;
 
             JsonArray colOut = so.createNestedArray("col");
             for (uint8_t cidx = 0; cidx < 3; cidx++) {
-                Serial.printf("Segment %u color[%u]: ", i, cidx);
                 CRGB c = S.colors[cidx];
-                Serial.printf("R=%u G=%u B=%u\n", c.red, c.green, c.blue);
                 JsonArray rgb = colOut.createNestedArray();
-                rgb.add(c.red);
-                rgb.add(c.green);
-                rgb.add(c.blue);
+                rgb.add(c.red); rgb.add(c.green); rgb.add(c.blue);
             }
         }
 
-        Serial.printf("Heap after JSON doc: %u\n", ESP.getFreeHeap());
-
-        String out;
-        serializeJson(resp, out);
-        Serial.println("response (7):");
+        String out; serializeJson(resp, out);
+        Serial.println("getState Response: ");
         Serial.println(out);
         Serial1.println(out);
+        return;
+    }
+
+    if (strcmp(cmd, "setTopology") == 0) {
+        JsonArray busses = doc["busses"].as<JsonArray>();
+        if (busses.isNull() || busses.size() == 0) {
+            respondError("busses must be a non-empty array");
+            return;
+        }
+
+        // Optional global ABL
+        if (doc.containsKey("globalMilliAmpsMax")) {
+            BusManager::setMilliampsMax((uint16_t) doc["globalMilliAmpsMax"].as<int>());
+        }
+
+        // Clear any previous configs
+        for (int i = 0; i < WLED_MAX_BUSSES + WLED_MIN_VIRTUAL_BUSSES; i++) {
+            if (busConfigs[i]) { delete busConfigs[i]; busConfigs[i] = nullptr; }
+        }
+        g_busBase.clear();
+
+        // Build new configs with cumulative start offsets
+        uint8_t idx = 0;
+        uint32_t cumulative = 0;
+        for (JsonObject b : busses) {
+            if (idx >= WLED_MAX_BUSSES) break;
+
+            uint8_t  pin  = b["pin"]   | 4;
+            uint16_t cnt  = b["count"] | 0;
+            const char* orderStr = b["colorOrder"] | "GRB";
+            if (!cnt) { continue; }
+
+            uint8_t order = COL_ORDER_GRB;
+            if      (!strcmp(orderStr, "GRB")) order = COL_ORDER_GRB;
+            else if (!strcmp(orderStr, "BRG")) order = COL_ORDER_BRG;
+            else if (!strcmp(orderStr, "RGB")) order = COL_ORDER_RGB;
+            // add more if needed
+
+            uint8_t pins[] = { pin };
+            busConfigs[idx] = new BusConfig(
+              TYPE_WS2812_RGB,
+              pins,
+              cumulative,   // startOffset (global pixel index)
+              cnt,          // count
+              order
+            );
+
+            if (b.containsKey("milliAmpsPerLed")) busConfigs[idx]->milliAmpsPerLed = (uint16_t)b["milliAmpsPerLed"].as<int>();
+            if (b.containsKey("milliAmpsMax"))    busConfigs[idx]->milliAmpsMax    = (uint16_t)b["milliAmpsMax"].as<int>();
+
+            g_busBase.push_back(cumulative);
+            cumulative += cnt;
+            idx++;
+        }
+
+        doInitBusses = true;             // ask WLED to rebuild hardware busses
+        g_topologyConfigured = true;
+
+        respondOk("busCount", (int)idx);
         return;
     }
 
